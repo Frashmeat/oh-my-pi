@@ -226,8 +226,9 @@ export class TranscriptContainer
 
 	scrollViewportRows(delta: number): void {
 		if (!Number.isFinite(delta) || delta === 0) return;
-		this.#viewportManual = true;
-		this.#viewportTopRow = Math.max(0, Math.trunc(this.#viewportTopRow + delta));
+		const maxTop = this.#maxViewportTop();
+		this.#viewportTopRow = Math.max(0, Math.min(maxTop, Math.trunc(this.#viewportTopRow + delta)));
+		this.#viewportManual = this.#viewportTopRow < maxTop;
 	}
 
 	setNativeScrollbackCommittedRows(rows: number): void {
@@ -343,6 +344,7 @@ export class TranscriptContainer
 		const rows = this.#viewportRows(this.#renderWidth);
 		if (rows === undefined) {
 			this.#viewportTopRow = segment.startRow;
+			this.#syncManualModeAtTail();
 			return;
 		}
 		const targetStart = segment.startRow + segment.sep;
@@ -353,17 +355,25 @@ export class TranscriptContainer
 			} else if (targetEnd > this.#viewportTopRow + rows) {
 				this.#viewportTopRow = targetEnd - rows;
 			}
-			return;
-		}
-		if (pending.align === "end") {
+		} else if (pending.align === "end") {
 			this.#viewportTopRow = targetEnd - rows;
-			return;
-		}
-		if (pending.align === "center") {
+		} else if (pending.align === "center") {
 			this.#viewportTopRow = Math.floor((targetStart + targetEnd - rows) / 2);
-			return;
+		} else {
+			this.#viewportTopRow = targetStart;
 		}
-		this.#viewportTopRow = targetStart;
+		this.#syncManualModeAtTail();
+	}
+
+	#maxViewportTop(): number {
+		const rows = this.#viewportRows(this.#renderWidth);
+		return rows === undefined ? 0 : Math.max(0, this.#lines.length - rows);
+	}
+
+	#syncManualModeAtTail(): void {
+		const maxTop = this.#maxViewportTop();
+		this.#viewportTopRow = Math.max(0, Math.min(this.#viewportTopRow, maxTop));
+		if (this.#viewportTopRow >= maxTop) this.#viewportManual = false;
 	}
 
 	#viewportSlice(width: number, lines: string[]): readonly string[] {
@@ -376,7 +386,9 @@ export class TranscriptContainer
 		if (!this.#viewportManual) {
 			this.#viewportTopRow = lines.length - rows;
 		}
-		this.#viewportTopRow = Math.max(0, Math.min(this.#viewportTopRow, lines.length - rows));
+		const maxTop = lines.length - rows;
+		this.#viewportTopRow = Math.max(0, Math.min(this.#viewportTopRow, maxTop));
+		if (this.#viewportTopRow >= maxTop) this.#viewportManual = false;
 		this.#nativeScrollbackLiveRegionStart = 0;
 		this.#stableRowsFloor = 0;
 		return lines.slice(this.#viewportTopRow, this.#viewportTopRow + rows);

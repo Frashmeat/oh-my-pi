@@ -66,10 +66,10 @@ describe("ExtensionUiController editor UI", () => {
 		const harness = makeHarness();
 		const ui = await harness.init();
 
-		const result = ui.scrollToEntryId?.("entry-1", { align: "center", highlight: true });
+		const result = ui.scrollToEntryId?.("entry-1", { align: "center" });
 
 		expect(result).toBe(true);
-		expect(harness.scrollToEntryId).toHaveBeenCalledWith("entry-1", { align: "center", highlight: true });
+		expect(harness.scrollToEntryId).toHaveBeenCalledWith("entry-1", { align: "center" });
 	});
 
 	it("bridges addAutocompleteProvider factories to the interactive mode context (#4919)", async () => {

@@ -771,6 +771,23 @@ describe("TranscriptContainer fixed viewport", () => {
 		expect(container.render(40)).toEqual(["a", "", "b"]);
 		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
 	});
+
+	it("resumes following the tail after scrolling back to the bottom", () => {
+		const container = new TranscriptContainer();
+		container.setViewportRowsProvider(() => 3);
+		container.addChild(new MutableBlock(["a"]));
+		container.addChild(new MutableBlock(["b"]));
+		container.addChild(new MutableBlock(["c"]));
+		expect(container.render(40)).toEqual(["b", "", "c"]);
+
+		container.scrollViewportRows(-2);
+		expect(container.render(40)).toEqual(["a", "", "b"]);
+		container.scrollViewportRows(99);
+		expect(container.render(40)).toEqual(["b", "", "c"]);
+
+		container.addChild(new MutableBlock(["d"]));
+		expect(container.render(40)).toEqual(["c", "", "d"]);
+	});
 });
 
 describe("FixedTranscriptLayout", () => {

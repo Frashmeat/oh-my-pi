@@ -161,7 +161,6 @@ export interface ExtensionWidgetOptions {
 
 export interface ExtensionScrollToEntryOptions {
 	align?: "start" | "center" | "end" | "nearest";
-	highlight?: boolean;
 }
 
 export type ExtensionUiComponent = Component & { dispose?(): void };

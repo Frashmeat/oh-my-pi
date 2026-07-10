@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an extension transcript-scroll API and a fixed interactive layout that keeps the composer visible while the transcript scrolls independently.
+
+### Fixed
+
+- Restored automatic transcript tail-following after PageDown, mouse-wheel scrolling, or an extension jump returns the viewport to the bottom.
+
 ## [16.3.15] - 2026-07-09
 
 ### Changed
