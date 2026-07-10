@@ -95,10 +95,11 @@ import {
 	encodeTextSignatureV1,
 	finalizeCustomToolCallInputDone,
 	finalizePendingResponsesToolCalls,
+	finalizeReasoningThinking,
 	finalizeToolCallArgumentsDone,
 	isOpenAIResponsesProgressEvent,
 	mapOpenAIResponsesStopReason,
-	normalizeOpenAIResponsesPromptCacheKey,
+	normalizeOpenAIPromptCacheKey,
 	populateResponsesUsageFromResponse,
 	promoteResponsesToolUseStopReason,
 } from "./openai-shared";
@@ -897,8 +898,8 @@ async function buildCodexRequestContext(
 	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
-	const promptCacheKey = normalizeOpenAIResponsesPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
-	const transportSessionId = normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
+	const promptCacheKey = normalizeOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
+	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const transformedBody = await buildTransformedCodexRequestBody(model, context, options, promptCacheKey);
 
 	const requestHeaders = { ...(model.headers ?? {}), ...(options?.headers ?? {}) };
@@ -945,10 +946,10 @@ export async function buildTransformedCodexRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options: OpenAICodexResponsesOptions | undefined,
-	promptCacheKey = normalizeOpenAIResponsesPromptCacheKey(options?.promptCacheKey ?? options?.sessionId),
+	promptCacheKey = normalizeOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId),
 ): Promise<RequestBody> {
 	const params: RequestBody = {
-		model: model.id,
+		model: model.requestModelId ?? model.id,
 		input: convertMessages(model, context),
 		stream: true,
 		prompt_cache_key: promptCacheKey,
@@ -1232,12 +1233,27 @@ function getOutputBlockStartEventType(block: CodexOutputBlock): "thinking_start"
 	return "toolcall_start";
 }
 
+const CODEX_STALE_PREVIOUS_RESPONSE_CODES: Record<string, true> = {
+	// OpenAI-standard code for an expired/missing `previous_response_id` chain.
+	previous_response_not_found: true,
+	// Proxy-specific: upstream response anchor expired. Same recovery class —
+	// retry the turn with full context and no `previous_response_id`.
+	codex_previous_response_stale: true,
+};
+
 function isCodexStalePreviousResponseError(error: unknown): boolean {
-	if (error instanceof CodexProviderStreamError) return error.code === "previous_response_not_found";
 	if (!(error instanceof Error)) return false;
-	if ((error as { code?: string }).code === "previous_response_not_found") return true;
-	// "unsupported": the backend intermittently rejects the parameter outright
-	// with `{"detail":"Unsupported parameter: previous_response_id"}` (no
+	if (
+		"code" in error &&
+		typeof error.code === "string" &&
+		Object.hasOwn(CODEX_STALE_PREVIOUS_RESPONSE_CODES, error.code)
+	) {
+		return true;
+	}
+	// Message-based fallback for providers/proxies that report the condition
+	// without a canonical code. Also covers "unsupported": the backend
+	// intermittently rejects the parameter outright with
+	// `{"detail":"Unsupported parameter: previous_response_id"}` (no
 	// `error.code`); treat it like a stale chain so the turn replays with full
 	// context instead of surfacing the 400.
 	return (
@@ -1392,6 +1408,21 @@ class CodexStreamProcessor {
 			return firstTokenTime;
 		}
 
+		if (eventType === "response.reasoning_text.delta") {
+			const entry = this.runtime.openItemForEvent(rawEvent);
+			const delta = typeof rawEvent.delta === "string" ? rawEvent.delta : "";
+			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
+				entry.block.thinking += delta;
+				stream.push({
+					type: "thinking_delta",
+					contentIndex: entry.contentIndex,
+					delta,
+					partial: output,
+				});
+			}
+			return firstTokenTime;
+		}
+
 		if (eventType === "response.reasoning_summary_part.done") {
 			if (this.runtime.currentItem?.type === "reasoning" && this.runtime.currentBlock?.type === "thinking") {
 				appendReasoningSummaryPartDone(
@@ -1507,13 +1538,13 @@ class CodexStreamProcessor {
 		// most-recently-added block may belong to a sibling (#2619). Some Codex
 		// function/custom tool items omit `id`; in that case `output_index` still
 		// routes `output_item.done` to the block that received `output_item.added`.
-		const itemId = typeof (item as { id?: string }).id === "string" ? (item as { id: string }).id : "";
+		const itemId = "id" in item && typeof item.id === "string" ? item.id : "";
 		const entry = (itemId ? runtime.openItems.get(itemId) : null) ?? runtime.openItemForEvent(rawEvent);
 		const block = entry?.block ?? null;
 		const contentIndex = entry?.contentIndex ?? output.content.length - 1;
 
 		if (item.type === "reasoning" && block?.type === "thinking") {
-			block.thinking = item.summary?.map(summary => summary.text).join("\n\n") || "";
+			block.thinking = finalizeReasoningThinking(item, block.thinking);
 			block.thinkingSignature = JSON.stringify(item);
 			stream.push({
 				type: "thinking_end",
@@ -2108,7 +2139,7 @@ export async function prewarmOpenAICodexResponses(
 	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
-	const transportSessionId = normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
+	const transportSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const promptCacheKey = transportSessionId;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const responsesLite = options?.responsesLite === true;
@@ -2252,7 +2283,7 @@ function getCodexWebSocketStateForPublicSession(
 ): CodexWebSocketSessionState | undefined {
 	const baseUrl = options?.baseUrl || model.baseUrl || CODEX_BASE_URL;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
-	const normalizedSessionId = normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
+	const normalizedSessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	const publicSessionKey = normalizedSessionId ? `${baseUrl}:${model.id}:${normalizedSessionId}` : undefined;
 	const privateSessionKey = publicSessionKey
 		? providerSessionState?.webSocketPublicToPrivate.get(publicSessionKey)
