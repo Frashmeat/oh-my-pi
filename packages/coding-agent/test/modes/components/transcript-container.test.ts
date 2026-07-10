@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { FixedTranscriptLayout } from "@oh-my-pi/pi-coding-agent/modes/components/fixed-transcript-layout";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -725,5 +726,81 @@ describe("TranscriptContainer renderViewportTail", () => {
 		expect([...empty.renderViewportTail(W, 10)]).toEqual([]);
 		const { container } = fourBlocks();
 		expect([...container.renderViewportTail(W, 0)]).toEqual([]);
+	});
+});
+
+describe("TranscriptContainer fixed viewport", () => {
+	it("renders only the viewport tail when a row budget is configured", () => {
+		const container = new TranscriptContainer();
+		container.setViewportRowsProvider(() => 3);
+		container.addChild(new MutableBlock(["a"]));
+		container.addChild(new MutableBlock(["b"]));
+		container.addChild(new MutableBlock(["c"]));
+
+		expect(container.render(40)).toEqual(["b", "", "c"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+	});
+
+	it("scrolls a component into the configured viewport", () => {
+		const container = new TranscriptContainer();
+		container.setViewportRowsProvider(() => 3);
+		const first = new MutableBlock(["first"]);
+		const target = new MutableBlock(["target-0", "target-1"]);
+		const tail = new MutableBlock(["tail"]);
+		container.addChild(first);
+		container.addChild(target);
+		container.addChild(tail);
+		container.render(40);
+
+		container.scrollComponentIntoView(target, { align: "start" });
+
+		expect(container.render(40)).toEqual(["target-0", "target-1", ""]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+	});
+
+	it("scrolls the configured viewport by rows", () => {
+		const container = new TranscriptContainer();
+		container.setViewportRowsProvider(() => 3);
+		container.addChild(new MutableBlock(["a"]));
+		container.addChild(new MutableBlock(["b"]));
+		container.addChild(new MutableBlock(["c"]));
+		container.render(40);
+
+		container.scrollViewportRows(-2);
+
+		expect(container.render(40)).toEqual(["a", "", "b"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+	});
+});
+
+describe("FixedTranscriptLayout", () => {
+	it("keeps the bottom composer rows fixed at the terminal bottom", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new MutableBlock(["a"]));
+		transcript.addChild(new MutableBlock(["b"]));
+		transcript.addChild(new MutableBlock(["c"]));
+		const layout = new FixedTranscriptLayout(transcript, [new MutableBlock(["> prompt"])], () => 5);
+
+		const lines = layout.render(40);
+
+		expect(lines).toHaveLength(5);
+		expect(lines.at(-1)).toBe("> prompt");
+		expect(lines.slice(0, -1)).toEqual(["", "b", "", "c"]);
+	});
+
+	it("scrolls transcript content without moving the composer row", () => {
+		const transcript = new TranscriptContainer();
+		const first = new MutableBlock(["first"]);
+		transcript.addChild(first);
+		transcript.addChild(new MutableBlock(["second"]));
+		transcript.addChild(new MutableBlock(["third"]));
+		const layout = new FixedTranscriptLayout(transcript, [new MutableBlock(["> prompt"])], () => 4);
+		layout.render(40);
+
+		transcript.scrollComponentIntoView(first, { align: "start" });
+		const lines = layout.render(40);
+
+		expect(lines).toHaveLength(4);
+		expect(lines).toEqual(["first", "", "second", "> prompt"]);
 	});
 });

@@ -8,6 +8,7 @@ import { ExtensionUiController } from "./extension-ui-controller";
 function makeHarness() {
 	const editor = new CustomEditor(getEditorTheme());
 	const requestRender = vi.fn();
+	const scrollToEntryId = vi.fn(() => true);
 	let uiContext: ExtensionUIContext | undefined;
 	const ctx = {
 		editor,
@@ -21,11 +22,13 @@ function makeHarness() {
 			expect(hasUI).toBe(true);
 			uiContext = context;
 		},
+		scrollToEntryId,
 	} as unknown as InteractiveModeContext;
 
 	return {
 		editor,
 		requestRender,
+		scrollToEntryId,
 		async init(): Promise<ExtensionUIContext> {
 			await new ExtensionUiController(ctx).initHooksAndCustomTools();
 			expect(uiContext).toBeDefined();
@@ -54,5 +57,15 @@ describe("ExtensionUiController editor UI", () => {
 
 		expect(harness.editor.getText()).toBe("hello");
 		expect(harness.requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("forwards extension scrollToEntryId to the interactive transcript", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+
+		const result = ui.scrollToEntryId?.("entry-1", { align: "center", highlight: true });
+
+		expect(result).toBe(true);
+		expect(harness.scrollToEntryId).toHaveBeenCalledWith("entry-1", { align: "center", highlight: true });
 	});
 });

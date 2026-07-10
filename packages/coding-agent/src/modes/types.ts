@@ -287,13 +287,18 @@ export interface InteractiveModeContext {
 	isKnownSlashCommand(text: string): boolean;
 	addMessageToChat(
 		message: AgentMessage,
-		options?: { populateHistory?: boolean; imageLinks?: readonly (string | undefined)[] },
+		options?: { populateHistory?: boolean; imageLinks?: readonly (string | undefined)[]; entryId?: string },
 	): Component[];
 	renderSessionContext(
 		sessionContext: SessionContext,
 		options?: { updateFooter?: boolean; populateHistory?: boolean },
 	): void;
 	renderInitialMessages(options?: { preserveExistingChat?: boolean; clearTerminalHistory?: boolean }): void;
+	registerTranscriptAnchor(entryId: string, component: Component): void;
+	clearTranscriptAnchors(): void;
+	scrollTranscriptRows(delta: number): void;
+	scrollTranscriptPage(direction: -1 | 1): void;
+	scrollToEntryId(entryId: string, options?: { align?: "start" | "center" | "end" | "nearest" }): boolean;
 	getUserMessageText(message: Message): string;
 	findLastAssistantMessage(): AssistantMessage | undefined;
 	extractAssistantText(message: AssistantMessage): string;

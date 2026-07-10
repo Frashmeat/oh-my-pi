@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 const packageDir = path.join(import.meta.dir, "..");
 const repoRoot = path.join(packageDir, "..", "..");
+const bunExecutable = process.execPath;
 // Optional cross-compile target, e.g. CROSS_TARGET=linux-arm64 → bun build
 // --target=bun-linux-arm64, embeds the matching native, outputs dist/omp-<target>.
 const crossTarget = Bun.env.CROSS_TARGET || null;
@@ -33,7 +34,8 @@ async function runCommand(
 	env: NodeJS.ProcessEnv = Bun.env,
 	cwd: string = packageDir,
 ): Promise<void> {
-	const proc = Bun.spawn(command, {
+	const actualCommand = command[0] === "bun" ? [bunExecutable, ...command.slice(1)] : command;
+	const proc = Bun.spawn(actualCommand, {
 		cwd,
 		env,
 		stdout: "inherit",
@@ -41,7 +43,7 @@ async function runCommand(
 	});
 	const exitCode = await proc.exited;
 	if (exitCode !== 0) {
-		throw new Error(`Command failed with exit code ${exitCode}: ${command.join(" ")}`);
+		throw new Error(`Command failed with exit code ${exitCode}: ${actualCommand.join(" ")}`);
 	}
 }
 

@@ -130,6 +130,7 @@ import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import { ErrorBannerComponent } from "./components/error-banner";
 import type { EvalExecutionComponent } from "./components/eval-execution";
+import { FixedTranscriptLayout } from "./components/fixed-transcript-layout";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
@@ -422,6 +423,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	#fixedTranscriptLayout!: FixedTranscriptLayout;
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -551,6 +553,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #inputController: InputController;
 	readonly #selectorController: SelectorController;
 	readonly #focusController: SessionFocusController;
+	readonly #transcriptAnchors = new Map<string, Component>();
 	get viewSession(): AgentSession {
 		return this.#focusController.target ?? this.session;
 	}
@@ -695,6 +698,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
+		this.#fixedTranscriptLayout = new FixedTranscriptLayout(
+			this.chatContainer,
+			[
+				this.pendingMessagesContainer,
+				this.todoContainer,
+				this.subagentContainer,
+				this.btwContainer,
+				this.omfgContainer,
+				this.errorBannerContainer,
+				this.modelCycleContainer,
+				this.statusContainer,
+				this.statusLine,
+				this.hookWidgetContainerAbove,
+				this.editorContainer,
+				this.hookWidgetContainerBelow,
+			],
+			() => this.ui.terminal.rows,
+		);
 		// Lazy provider — the top border rebuild coalesces to at most one
 		// invocation per painted frame instead of firing on every session event
 		// (#4145). The TUI throttles renders at ~30fps, so a long-running eval
@@ -863,8 +884,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#welcomeComponent = undefined;
 
 		for (const warning of this.session.configWarnings) {
-			this.ui.addChild(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0));
-			this.ui.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0));
 		}
 
 		if (!startupQuiet) {
@@ -878,47 +898,28 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 
 			// Setup UI layout
-			this.ui.addChild(new Spacer(1));
-			this.ui.addChild(this.#welcomeComponent);
-			this.ui.addChild(new Spacer(1));
+			this.chatContainer.addChild(this.#welcomeComponent);
 			if (!options.suppressWelcomeIntro) {
 				this.playWelcomeIntro();
 			}
 
 			// Add changelog if provided
 			if (this.#changelogMarkdown) {
-				this.ui.addChild(new DynamicBorder());
+				this.chatContainer.addChild(new DynamicBorder());
 				if (settings.get("collapseChangelog")) {
 					const versionMatch = this.#changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
 					const latestVersion = versionMatch ? versionMatch[1] : this.#version;
 					const condensedText = `Updated to v${latestVersion}. Use ${theme.bold("/changelog")} to view full changelog.`;
-					this.ui.addChild(new Text(condensedText, 1, 0));
+					this.chatContainer.addChild(new Text(condensedText, 1, 0));
 				} else {
-					this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-					this.ui.addChild(new Spacer(1));
-					this.ui.addChild(new Markdown(this.#changelogMarkdown.trim(), 1, 0, getMarkdownTheme()));
-					this.ui.addChild(new Spacer(1));
+					this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+					this.chatContainer.addChild(new Markdown(this.#changelogMarkdown.trim(), 1, 0, getMarkdownTheme()));
 				}
-				this.ui.addChild(new DynamicBorder());
+				this.chatContainer.addChild(new DynamicBorder());
 			}
 		}
 
-		this.ui.addChild(this.chatContainer);
-		this.ui.addChild(this.pendingMessagesContainer);
-		this.ui.addChild(this.todoContainer);
-		this.ui.addChild(this.subagentContainer);
-		this.ui.addChild(this.btwContainer);
-		this.ui.addChild(this.omfgContainer);
-		this.ui.addChild(this.errorBannerContainer);
-		this.ui.addChild(this.modelCycleContainer);
-		// Working loader / transient status sits below the sticky todo + subagent
-		// HUDs, just above the editor's hook-widget top margin — so it reads next to
-		// the prompt while keeping the one-line gap above the editor.
-		this.ui.addChild(this.statusContainer);
-		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
-		this.ui.addChild(this.hookWidgetContainerAbove);
-		this.ui.addChild(this.editorContainer);
-		this.ui.addChild(this.hookWidgetContainerBelow);
+		this.ui.addChild(this.#fixedTranscriptLayout);
 		this.ui.setFocus(this.editor);
 
 		this.#inputController.setupKeyHandlers();
@@ -940,6 +941,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Start the UI. Cold `omp` launch opts into clearing on the first paint so
 		// the initial welcome frame does not append over the previous run's scrollback.
 		this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
+		this.ui.setMouseTrackingEnabled(true);
 		pushTerminalTitle();
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.updateEditorBorderColor();
@@ -1565,6 +1567,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 			}
 		}
+		this.clearTranscriptAnchors();
 		this.chatContainer.clear();
 		// Live display uses the compacted transcript tail; export/resume callers
 		// can still request the full inline compaction history.
@@ -3373,6 +3376,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
 		if (this.isInitialized) {
+			this.ui.setMouseTrackingEnabled(false);
 			this.ui.stop();
 			this.isInitialized = false;
 		}
@@ -3481,6 +3485,43 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	// UI helpers
+	#chatViewportRows(width: number): number | undefined {
+		void width;
+		return this.#fixedTranscriptLayout.getTranscriptRows();
+	}
+
+	registerTranscriptAnchor(entryId: string, component: Component): void {
+		this.#transcriptAnchors.set(entryId, component);
+	}
+
+	clearTranscriptAnchors(): void {
+		this.#transcriptAnchors.clear();
+	}
+
+	scrollTranscriptRows(delta: number): void {
+		this.chatContainer.scrollViewportRows(delta);
+		this.ui.requestRender();
+	}
+
+	scrollTranscriptPage(direction: -1 | 1): void {
+		const columns =
+			Number.isFinite(this.ui.terminal.columns) && this.ui.terminal.columns > 0 ? this.ui.terminal.columns : 80;
+		const rows = this.#chatViewportRows(columns) ?? 10;
+		this.scrollTranscriptRows(direction * Math.max(1, rows - 1));
+	}
+
+	scrollToEntryId(entryId: string, options?: { align?: "start" | "center" | "end" | "nearest" }): boolean {
+		let component = this.#transcriptAnchors.get(entryId);
+		if (!component) {
+			this.rebuildChatFromMessages();
+			component = this.#transcriptAnchors.get(entryId);
+		}
+		if (!component) return false;
+		this.chatContainer.scrollComponentIntoView(component, { align: options?.align });
+		this.ui.requestRender();
+		return true;
+	}
+
 	present(content: Component | readonly Component[]): void {
 		if (Array.isArray(content)) {
 			for (const item of content) this.#mountChatChild(item);
@@ -3496,6 +3537,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	resetTranscript(): void {
+		this.clearTranscriptAnchors();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
 	}
@@ -3721,7 +3763,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	addMessageToChat(
 		message: AgentMessage,
-		options?: { populateHistory?: boolean; imageLinks?: readonly (string | undefined)[] },
+		options?: { populateHistory?: boolean; imageLinks?: readonly (string | undefined)[]; entryId?: string },
 	): Component[] {
 		return this.#uiHelpers.addMessageToChat(message, options);
 	}

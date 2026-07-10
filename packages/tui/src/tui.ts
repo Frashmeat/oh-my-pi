@@ -1043,6 +1043,7 @@ export class TUI extends Container {
 	#altPreviousLines: string[] = [];
 	#altEnterWidth = 0;
 	#altEnterHeight = 0;
+	#baseMouseTrackingEnabled = false;
 
 	// Persistent composed frame. The render override splices only rows at/after
 	// the stable prefix each frame; cursor markers are stripped at ingestion so
@@ -1511,6 +1512,13 @@ export class TUI extends Container {
 		return () => {
 			this.#inputListeners.delete(listener);
 		};
+	}
+
+	setMouseTrackingEnabled(enabled: boolean): void {
+		if (this.#baseMouseTrackingEnabled === enabled) return;
+		this.#baseMouseTrackingEnabled = enabled;
+		if (this.#stopped || this.#altActive) return;
+		this.terminal.write(enabled ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
 	}
 
 	removeInputListener(listener: InputListener): void {
@@ -2497,7 +2505,9 @@ export class TUI extends Container {
 			this.#altEnterHeight = height;
 		} else if (!wantAlt && this.#altActive) {
 			const enhancementExit = this.#keyboardEnhancementExit();
-			this.terminal.write(`${MOUSE_TRACKING_OFF}${enhancementExit}\x1b[?1049l`);
+			this.terminal.write(
+				`${MOUSE_TRACKING_OFF}${enhancementExit}\x1b[?1049l${this.#baseMouseTrackingEnabled ? MOUSE_TRACKING_ON : ""}`,
+			);
 			setAltScreenActive(false);
 			this.#forgetHardwareCursorState();
 			this.#altActive = false;

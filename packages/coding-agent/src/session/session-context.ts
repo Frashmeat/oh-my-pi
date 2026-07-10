@@ -56,6 +56,8 @@ function snapcompactHistoryBlockOptions(
 
 export interface SessionContext {
 	messages: AgentMessage[];
+	/** Entry ids parallel to `messages`; undefined for synthesized messages that do not map to a single session entry. */
+	messageEntryIds?: Array<string | undefined>;
 	thinkingLevel?: string;
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
@@ -155,6 +157,7 @@ export function buildSessionContext(
 		// Explicitly null - return no messages (navigated to before first entry)
 		return {
 			messages: [],
+			messageEntryIds: [],
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
@@ -175,6 +178,7 @@ export function buildSessionContext(
 	if (!leaf) {
 		return {
 			messages: [],
+			messageEntryIds: [],
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
@@ -262,6 +266,7 @@ export function buildSessionContext(
 	// 2. Emit kept messages (from firstKeptEntryId up to compaction)
 	// 3. Emit messages after compaction
 	const messages: AgentMessage[] = [];
+	const messageEntryIds: Array<string | undefined> = [];
 	const cacheMissExplainedAt: boolean[] = [];
 	let pendingReset = false;
 	let currentMode = "none";
@@ -281,8 +286,9 @@ export function buildSessionContext(
 		}
 	};
 
-	const pushMessage = (msg: AgentMessage) => {
+	const pushMessage = (msg: AgentMessage, entryId?: string) => {
 		messages.push(msg);
+		messageEntryIds.push(entryId);
 		if (!options?.transcript) return;
 		if (msg.role === "assistant") {
 			const currentModel = `${msg.provider}/${msg.model}`;
@@ -305,7 +311,7 @@ export function buildSessionContext(
 			) {
 				return;
 			}
-			pushMessage(entry.message);
+			pushMessage(entry.message, entry.id);
 		} else if (entry.type === "custom_message") {
 			if (!isCustomMessageContent(entry.content)) return;
 			const normalized = normalizeCustomMessagePayload(entry);
@@ -319,9 +325,10 @@ export function buildSessionContext(
 					entry.timestamp,
 					attribution,
 				),
+				entry.id,
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
-			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
+			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp), entry.id);
 		}
 	};
 
@@ -468,6 +475,7 @@ export function buildSessionContext(
 			);
 		if (normalized.length === 0) {
 			messages.splice(i, 1);
+			messageEntryIds.splice(i, 1);
 			if (options?.transcript) {
 				cacheMissExplainedAt.splice(i, 1);
 			}
@@ -478,6 +486,7 @@ export function buildSessionContext(
 
 	return {
 		messages,
+		messageEntryIds,
 		cacheMissExplainedAt: options?.transcript ? cacheMissExplainedAt : undefined,
 		thinkingLevel,
 		configuredThinkingLevel,

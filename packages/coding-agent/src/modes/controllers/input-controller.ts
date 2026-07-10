@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
+import { type AutocompleteProvider, matchesKey, routeSgrMouseInput, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { $env, isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
@@ -159,6 +159,7 @@ export class InputController {
 	#focusedLeftTapListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
+	#transcriptScrollListenerInstalled = false;
 	// Tap counter for the double-← gesture; reset whenever a quiet gap
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
@@ -296,6 +297,32 @@ export class InputController {
 				if (this.ctx.editor.getText().trim()) return undefined;
 				void this.ctx.handleBtwCopyKey();
 				return { consume: true };
+			});
+		}
+		if (!this.#transcriptScrollListenerInstalled) {
+			this.#transcriptScrollListenerInstalled = true;
+			this.ctx.ui.addInputListener(data => {
+				const focused = typeof this.ctx.ui.getFocused === "function" ? this.ctx.ui.getFocused() : this.ctx.editor;
+				if (focused !== this.ctx.editor) return undefined;
+				if (data.startsWith("\x1b[<")) {
+					const handled = routeSgrMouseInput(data, event => {
+						if (event.wheel === null) return false;
+						this.ctx.scrollTranscriptRows(event.wheel * 3);
+						return true;
+					});
+					return handled ? { consume: true } : undefined;
+				}
+				if (matchesKey(data, "pageUp")) {
+					if (this.ctx.editor.getLines().length > 1) return undefined;
+					this.ctx.scrollTranscriptPage(-1);
+					return { consume: true };
+				}
+				if (matchesKey(data, "pageDown")) {
+					if (this.ctx.editor.getLines().length > 1) return undefined;
+					this.ctx.scrollTranscriptPage(1);
+					return { consume: true };
+				}
+				return undefined;
 			});
 		}
 		this.ctx.editor.onEscape = () => {

@@ -122,7 +122,7 @@ export class UiHelpers {
 
 	addMessageToChat(
 		message: AgentMessage,
-		options?: { populateHistory?: boolean; imageLinks?: readonly (string | undefined)[] },
+		options?: { populateHistory?: boolean; imageLinks?: readonly (string | undefined)[]; entryId?: string },
 	): Component[] {
 		switch (message.role) {
 			case "bashExecution": {
@@ -243,6 +243,7 @@ export class UiHelpers {
 						);
 					const userComponent = new UserMessageComponent(textContent, isSynthetic, imageLinks);
 					this.ctx.chatContainer.addChild(userComponent);
+					if (options?.entryId) this.ctx.registerTranscriptAnchor(options.entryId, userComponent);
 					if (options?.populateHistory && message.role === "user" && !isSynthetic) {
 						this.ctx.editor.addToHistory(textContent);
 					}
@@ -252,6 +253,7 @@ export class UiHelpers {
 			case "assistant": {
 				const assistantComponent = createAssistantMessageComponent(this.ctx, message);
 				this.ctx.chatContainer.addChild(assistantComponent);
+				if (options?.entryId) this.ctx.registerTranscriptAnchor(options.entryId, assistantComponent);
 				break;
 			}
 			case "toolResult": {
@@ -350,13 +352,15 @@ export class UiHelpers {
 			previous.seal();
 		};
 		const messages = sessionContext.messages;
+		const messageEntryIds = sessionContext.messageEntryIds;
 		const count = messages.length;
 		for (let i = 0; i < count; i++) {
 			const message = messages[i]!;
+			const entryId = messageEntryIds?.[i];
 			if (message.role !== "toolResult") flushPendingUsage();
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				this.ctx.addMessageToChat(message);
+				this.ctx.addMessageToChat(message, { entryId });
 				const lastChild = this.ctx.chatContainer.children[this.ctx.chatContainer.children.length - 1];
 				const assistantComponent = lastChild instanceof AssistantMessageComponent ? lastChild : undefined;
 				if (assistantComponent) {
@@ -540,7 +544,7 @@ export class UiHelpers {
 				if (message.role === "user") resolveWaitingPoll();
 				if (message.role === "user") resolveTodoSnapshot();
 				// All other messages use standard rendering
-				this.ctx.addMessageToChat(message, options);
+				this.ctx.addMessageToChat(message, { ...options, entryId });
 			}
 		}
 		flushPendingUsage();

@@ -109,6 +109,12 @@ const EMPTY_SEGMENTS: BlockSegment[] = [];
 /** Shared empty result for an empty viewport-tail render (no allocation). */
 const EMPTY_TAIL: readonly string[] = [];
 
+type TranscriptViewportRowsProvider = (width: number) => number | undefined;
+
+export interface TranscriptScrollOptions {
+	align?: "start" | "center" | "end" | "nearest";
+}
+
 /**
  * Transcript container that renders every block's current content each frame
  * and reports the native-scrollback exactness boundary
@@ -154,6 +160,15 @@ export class TranscriptContainer
 	// Finalized blocks wholly before this boundary are immutable on-screen history;
 	// their previous contribution can be replayed without calling render().
 	#committedRows = 0;
+	#viewportRowsProvider: TranscriptViewportRowsProvider | undefined;
+	#viewportTopRow = 0;
+	#viewportManual = false;
+	#pendingScroll:
+		| {
+				component: Component;
+				align: NonNullable<TranscriptScrollOptions["align"]>;
+		  }
+		| undefined;
 	// Stable-prefix floor accumulated across renders since the last
 	// getRenderStablePrefixRows() read (see RenderStablePrefix: reading
 	// consumes the report and re-bases the baseline). Out-of-band renders
@@ -168,7 +183,33 @@ export class TranscriptContainer
 
 	override clear(): void {
 		this.#generation++;
+		this.#viewportTopRow = 0;
+		this.#viewportManual = false;
+		this.#pendingScroll = undefined;
 		super.clear();
+	}
+
+	setViewportRowsProvider(provider: TranscriptViewportRowsProvider | undefined): void {
+		this.#viewportRowsProvider = provider;
+		this.#viewportTopRow = 0;
+		this.#viewportManual = false;
+		this.#pendingScroll = undefined;
+		this.invalidate();
+	}
+
+	scrollComponentIntoView(component: Component, options: TranscriptScrollOptions = {}): void {
+		this.#pendingScroll = {
+			component,
+			align: options.align ?? "center",
+		};
+		this.#viewportManual = true;
+		this.#applyPendingScroll();
+	}
+
+	scrollViewportRows(delta: number): void {
+		if (!Number.isFinite(delta) || delta === 0) return;
+		this.#viewportManual = true;
+		this.#viewportTopRow = Math.max(0, Math.trunc(this.#viewportTopRow + delta));
 	}
 
 	setNativeScrollbackCommittedRows(rows: number): void {
@@ -267,6 +308,60 @@ export class TranscriptContainer
 			for (let j = 0; j < body.length; j++) rows.push(body[j]!);
 		}
 		return rows.length > maxRows ? rows.slice(rows.length - maxRows) : rows;
+	}
+
+	#viewportRows(width: number): number | undefined {
+		const value = this.#viewportRowsProvider?.(width);
+		if (value === undefined || !Number.isFinite(value)) return undefined;
+		return Math.max(1, Math.trunc(value));
+	}
+
+	#applyPendingScroll(): void {
+		const pending = this.#pendingScroll;
+		if (!pending) return;
+		const segment = this.#segments.find(s => s.component === pending.component);
+		if (!segment) return;
+		this.#pendingScroll = undefined;
+		const rows = this.#viewportRows(this.#renderWidth);
+		if (rows === undefined) {
+			this.#viewportTopRow = segment.startRow;
+			return;
+		}
+		const targetStart = segment.startRow + segment.sep;
+		const targetEnd = segment.startRow + segment.rowCount;
+		if (pending.align === "nearest") {
+			if (targetStart < this.#viewportTopRow) {
+				this.#viewportTopRow = targetStart;
+			} else if (targetEnd > this.#viewportTopRow + rows) {
+				this.#viewportTopRow = targetEnd - rows;
+			}
+			return;
+		}
+		if (pending.align === "end") {
+			this.#viewportTopRow = targetEnd - rows;
+			return;
+		}
+		if (pending.align === "center") {
+			this.#viewportTopRow = Math.floor((targetStart + targetEnd - rows) / 2);
+			return;
+		}
+		this.#viewportTopRow = targetStart;
+	}
+
+	#viewportSlice(width: number, lines: string[]): readonly string[] {
+		const rows = this.#viewportRows(width);
+		if (rows === undefined || lines.length <= rows) {
+			this.#viewportTopRow = 0;
+			this.#viewportManual = false;
+			return lines;
+		}
+		if (!this.#viewportManual) {
+			this.#viewportTopRow = lines.length - rows;
+		}
+		this.#viewportTopRow = Math.max(0, Math.min(this.#viewportTopRow, lines.length - rows));
+		this.#nativeScrollbackLiveRegionStart = 0;
+		this.#stableRowsFloor = 0;
+		return lines.slice(this.#viewportTopRow, this.#viewportTopRow + rows);
 	}
 
 	override render(width: number): readonly string[] {
@@ -440,7 +535,8 @@ export class TranscriptContainer
 		if (lines.length !== row) lines.length = row;
 		this.#segments = segments;
 		this.#stableRowsFloor = Math.min(stableFloorBefore, stableRows, row);
-		return lines;
+		this.#applyPendingScroll();
+		return this.#viewportSlice(width, lines);
 	}
 }
 

@@ -27,6 +27,7 @@ type FakeEditor = {
 	setText(text: string): void;
 	getText(): string;
 	getExpandedText(): string;
+	getLines(): string[];
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
@@ -73,6 +74,8 @@ async function createContext() {
 	const showModelSelector = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const scrollTranscriptPage = vi.fn();
+	const scrollTranscriptRows = vi.fn();
 	let focused: unknown;
 	const addInputListener = vi.fn((listener: InputListener) => {
 		void listener;
@@ -108,6 +111,9 @@ async function createContext() {
 		},
 		getExpandedText() {
 			return editorText;
+		},
+		getLines() {
+			return editorText.split("\n");
 		},
 		addToHistory: vi.fn(),
 		pasteText(text: string) {
@@ -188,6 +194,8 @@ async function createContext() {
 		handleSTTToggle: vi.fn(),
 		showDebugSelector: vi.fn(),
 		showHistorySearch: vi.fn(),
+		scrollTranscriptPage,
+		scrollTranscriptRows,
 		toggleThinkingBlockVisibility: vi.fn(),
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
@@ -223,6 +231,8 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			scrollTranscriptPage,
+			scrollTranscriptRows,
 		},
 	};
 }
@@ -436,6 +446,40 @@ describe("InputController keybinding setup", () => {
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwCopyKey).not.toHaveBeenCalled();
+	});
+
+	it("routes page keys to the transcript viewport when the editor has no multiline draft", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[5~");
+
+		expect(result).toEqual({ consume: true });
+		expect(spies.scrollTranscriptPage).toHaveBeenCalledWith(-1);
+	});
+
+	it("routes SGR mouse wheel to the transcript viewport", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[<65;10;4M");
+
+		expect(result).toEqual({ consume: true });
+		expect(spies.scrollTranscriptRows).toHaveBeenCalledWith(3);
+	});
+
+	it("lets page keys fall through while editing a multiline draft", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		editor.setText("line one\nline two");
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[5~");
+
+		expect(result).toBeUndefined();
+		expect(spies.scrollTranscriptPage).not.toHaveBeenCalled();
 	});
 
 	it("empty Enter aborts the active stream when queued messages are pending", async () => {

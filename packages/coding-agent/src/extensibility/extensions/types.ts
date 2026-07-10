@@ -159,6 +159,11 @@ export interface ExtensionWidgetOptions {
 	placement?: WidgetPlacement;
 }
 
+export interface ExtensionScrollToEntryOptions {
+	align?: "start" | "center" | "end" | "nearest";
+	highlight?: boolean;
+}
+
 export type ExtensionUiComponent = Component & { dispose?(): void };
 export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionUiComponent;
 export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | undefined;
@@ -200,6 +205,9 @@ export interface ExtensionUIContext {
 
 	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
 	setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
+
+	/** Scroll the visible transcript to a session entry without changing the session tree. */
+	scrollToEntryId?(entryId: string, options?: ExtensionScrollToEntryOptions): boolean;
 
 	/** Set a custom footer component, or undefined to restore the built-in footer. */
 	setFooter(factory: ExtensionUiComponentFactory | undefined): void;
