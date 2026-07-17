@@ -451,6 +451,31 @@ describe("Settings", () => {
 
 			expect(settings.getModelRole("default")).toBe("anthropic/claude-opus-4-5");
 		});
+		it("clears a role when setModelRole receives undefined", () => {
+			const settings = Settings.isolated();
+
+			settings.setModelRole("smol", "x/y");
+			expect(settings.getModelRole("smol")).toBe("x/y");
+
+			settings.setModelRole("smol", undefined);
+
+			expect(settings.getModelRole("smol")).toBeUndefined();
+			expect(Object.hasOwn(settings.getModelRoles(), "smol")).toBe(false);
+		});
+
+		it("clears a role from the runtime override layer so the effective view updates immediately", () => {
+			const settings = Settings.isolated({
+				modelRoles: { smol: "anthropic/claude-haiku-4-5" },
+			});
+
+			settings.overrideModelRoles({ smol: "openai/gpt-5.2-codex" });
+			expect(settings.getModelRole("smol")).toBe("openai/gpt-5.2-codex");
+
+			settings.setModelRole("smol", undefined);
+
+			expect(settings.getModelRole("smol")).toBeUndefined();
+			expect(Object.hasOwn(settings.getModelRoles(), "smol")).toBe(false);
+		});
 	});
 
 	describe("getEditVariantForModel", () => {
@@ -669,15 +694,18 @@ describe("Settings", () => {
 			expect(settings.get("grep.enabled")).toBe(true);
 		});
 
-		it("migrates legacy tool names in persisted essential overrides", async () => {
+		it("drops dead BM25-discovery keys and leaves tools.xdev at its default", async () => {
 			await writeSettings({
-				tools: { essentialOverride: ["read", "find", "search", "grep"] },
-				"tools.essentialOverride": ["find", "search", "read"],
+				tools: { discoveryMode: "off", essentialOverride: ["read"] },
+				mcp: { discoveryMode: "auto", discoveryDefaultServers: ["gh"] },
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("tools.essentialOverride")).toEqual(["read", "glob", "grep"]);
+			// No migration mapping: legacy discovery intent is discarded, xdev
+			// keeps its own default. An explicit xdev value is untouched.
+			expect(settings.get("tools.xdev")).toBe(true);
+			expect(settings.isConfigured("tools.xdev")).toBe(false);
 		});
 
 		it("migrates from settings.json containing comments", async () => {

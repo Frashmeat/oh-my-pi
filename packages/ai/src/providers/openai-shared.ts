@@ -25,8 +25,10 @@ import {
 	classifyJsonPrefix,
 	extractHttpStatusFromError,
 	logger,
+	parseImageMetadata,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
+	stringifyJson,
 	structuredCloneJSON,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -337,6 +339,29 @@ export function applyOpenAIResponsesServiceTierCost(
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 
+/** Reconcile token-price estimates with OpenRouter's authoritative account charge. */
+export function applyOpenRouterReportedCost(model: Pick<Model, "provider">, usage: Usage, rawUsage: unknown): void {
+	if (model.provider !== "openrouter" || typeof rawUsage !== "object" || rawUsage === null) return;
+	const reportedCost = Reflect.get(rawUsage, "cost");
+	if (typeof reportedCost !== "number" || !Number.isFinite(reportedCost) || reportedCost < 0) return;
+
+	const estimatedCost = usage.cost.total;
+	if (Number.isFinite(estimatedCost) && estimatedCost > 0) {
+		const scale = reportedCost / estimatedCost;
+		usage.cost.input *= scale;
+		usage.cost.output *= scale;
+		usage.cost.cacheRead *= scale;
+		usage.cost.cacheWrite *= scale;
+	} else {
+		// Keep legacy component-only aggregators additive when catalog pricing is unavailable.
+		usage.cost.input = reportedCost;
+		usage.cost.output = 0;
+		usage.cost.cacheRead = 0;
+		usage.cost.cacheWrite = 0;
+	}
+	usage.cost.total = reportedCost;
+}
+
 export interface OpenAIUsageAccountingInput {
 	promptTokens: number;
 	outputTokens: number;
@@ -643,7 +668,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 
 /** Reasoning-relevant slice of caller options the Chat Completions dialect dispatch reads. */
 export interface ChatCompletionsReasoningOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	disableReasoning?: boolean;
 }
 
@@ -1076,6 +1101,7 @@ export const OPENAI_RESPONSES_PROGRESS_EVENT_TYPES: ReadonlySet<string> = new Se
 	"response.output_item.added",
 	"response.reasoning_summary_part.added",
 	"response.reasoning_summary_text.delta",
+	"response.reasoning_summary_text.done",
 	"response.reasoning_summary_part.done",
 	"response.reasoning_text.delta",
 	"response.content_part.added",
@@ -1355,6 +1381,65 @@ export function convertResponsesInputContent(
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
 
+/**
+ * Map freeform custom-tool wire names back to the internal tool name for
+ * providers that only accept function_call / function_call_output.
+ * Built once per request; `apply_patch` → `edit` is the OMP default.
+ */
+function buildCustomToolWireNameMap(tools: readonly Tool[] | undefined): ReadonlyMap<string, string> | undefined {
+	if (!tools?.length) return undefined;
+	const map = new Map<string, string>();
+	for (const tool of tools) {
+		if (tool.customWireName) map.set(tool.customWireName, tool.name);
+	}
+	return map.size > 0 ? map : undefined;
+}
+
+function resolveReplayCustomToolName(wireName: string, wireNameMap: ReadonlyMap<string, string> | undefined): string {
+	return wireNameMap?.get(wireName) ?? (wireName === "apply_patch" ? "edit" : wireName);
+}
+
+/**
+ * Downgrade OpenAI-only custom tool items when the target model does not
+ * advertise freeform custom tools (`applyPatchToolType === "freeform"`).
+ * No-op (returns the same array reference) when freeform is supported.
+ */
+function adaptResponsesReplayItemsForModel(
+	input: ResponseInput,
+	supportsCustomToolCalls: boolean,
+	wireNameMap: ReadonlyMap<string, string> | undefined,
+): ResponseInput {
+	if (supportsCustomToolCalls) return input;
+
+	let changed = false;
+	const adapted: ResponseInput = [];
+	for (const item of input) {
+		if (item.type === "custom_tool_call") {
+			changed = true;
+			adapted.push({
+				type: "function_call",
+				...(item.id ? { id: item.id } : {}),
+				call_id: item.call_id,
+				name: resolveReplayCustomToolName(item.name, wireNameMap),
+				arguments: JSON.stringify({ input: item.input }),
+				...(item.namespace ? { namespace: item.namespace } : {}),
+			});
+			continue;
+		}
+		if (item.type === "custom_tool_call_output") {
+			changed = true;
+			adapted.push({
+				type: "function_call_output",
+				call_id: item.call_id,
+				output: item.output,
+			});
+			continue;
+		}
+		adapted.push(item);
+	}
+	return changed ? adapted : input;
+}
+
 export interface BuildResponsesInputOptions<TApi extends Api> {
 	model: Model<TApi>;
 	context: Context;
@@ -1379,6 +1464,15 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		messages.push({ role: options.systemRole as "system" | "developer", content: systemPrompt });
 	}
 
+	// Compat is resolved by the catalog (e.g. Copilot / xai-oauth reject
+	// `detail: "original"`). Do not re-branch on provider id here.
+	const supportsImageDetailOriginal = options.supportsImageDetailOriginal;
+	// Freeform custom tools (`custom_tool_call`) only when the catalog says so;
+	// same gate as tool conversion (`applyPatchToolType === "freeform"`).
+	const supportsCustomToolCalls = options.model.applyPatchToolType === "freeform";
+	const customToolWireNameMap = supportsCustomToolCalls
+		? undefined
+		: buildCustomToolWireNameMap(options.context.tools);
 	let knownCallIds = new Set<string>();
 	const customCallIds = new Set<string>();
 	const transformedMessages = transformMessages(
@@ -1406,7 +1500,12 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				}) ??
 					false);
 			if (historyItems && shouldReplayPayloadItems) {
-				messages.push(...sanitizeOpenAIResponsesHistoryItemsForReplay(filterReasoning(historyItems)));
+				const sanitizedItems = sanitizeOpenAIResponsesHistoryItemsForReplay(filterReasoning(historyItems), {
+					supportsImageDetailOriginal,
+				});
+				messages.push(
+					...adaptResponsesReplayItemsForModel(sanitizedItems, supportsCustomToolCalls, customToolWireNameMap),
+				);
 				knownCallIds = collectKnownCallIds(messages);
 				for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
 				msgIndex++;
@@ -1415,7 +1514,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 			const content = convertResponsesInputContent(
 				msg.content,
 				options.model.input.includes("image"),
-				options.supportsImageDetailOriginal,
+				supportsImageDetailOriginal,
 			);
 			if (!content) continue;
 			messages.push({
@@ -1443,9 +1542,17 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 			const historyItems = providerPayload?.items;
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
-				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
+				const rawSanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 					filterReasoning(historyItems),
+					{ supportsImageDetailOriginal },
 				);
+				const sanitizedHistoryItems = rawSanitizedHistoryItems
+					? adaptResponsesReplayItemsForModel(
+							rawSanitizedHistoryItems,
+							supportsCustomToolCalls,
+							customToolWireNameMap,
+						)
+					: undefined;
 				if (nativeReplayEnabled && sanitizedHistoryItems) {
 					if (providerPayload?.dt) {
 						messages.push(...sanitizedHistoryItems);
@@ -1468,6 +1575,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				suppressHiddenEmptyFallback ? false : includeThinkingSignatures,
 				customCallIds,
 				options.preserveAssistantMessageIds,
+				supportsCustomToolCalls,
+				customToolWireNameMap,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -1480,9 +1589,10 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				msg,
 				options.model,
 				options.strictResponsesPairing,
-				options.supportsImageDetailOriginal,
+				supportsImageDetailOriginal,
 				knownCallIds,
 				customCallIds,
+				supportsCustomToolCalls,
 			);
 		}
 		msgIndex++;
@@ -1515,6 +1625,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	includeThinkingSignatures = true,
 	customCallIds?: Set<string>,
 	preserveMessageIds = false,
+	supportsCustomToolCalls = true,
+	customToolWireNameMap?: ReadonlyMap<string, string>,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -1586,7 +1698,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			itemId = undefined;
 		}
 		knownCallIds.add(normalized.callId);
-		if (block.customWireName) {
+		if (block.customWireName && supportsCustomToolCalls) {
 			const rawInput = typeof block.arguments?.input === "string" ? block.arguments.input : "";
 			customCallIds?.add(normalized.callId);
 			outputItems.push({
@@ -1598,12 +1710,16 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			} as ResponseInput[number]);
 			continue;
 		}
+		const functionName =
+			block.customWireName && !supportsCustomToolCalls
+				? resolveReplayCustomToolName(block.customWireName, customToolWireNameMap)
+				: block.name;
 		outputItems.push({
 			type: "function_call",
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
-			name: block.name,
-			arguments: JSON.stringify(block.arguments),
+			name: functionName,
+			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
 
@@ -1618,6 +1734,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	supportsImageDetailOriginal: boolean,
 	knownCallIds: ReadonlySet<string>,
 	customCallIds?: ReadonlySet<string>,
+	supportsCustomToolCalls = true,
 ): void {
 	const supportsImages = model.input.includes("image");
 	const textResult = toolResult.content
@@ -1627,12 +1744,19 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
 	const omittedImages = hasImages && !supportsImages;
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
+	// "(see attached image)" is only truthful when the result actually carries
+	// images (they ride as a separate user message on the Responses API). A
+	// genuinely empty text result (empty file read, silent tool) must stay
+	// empty — the placeholder sent models chasing an attachment that never
+	// existed.
 	const output = (
 		omittedImages
 			? joinTextWithImagePlaceholder(textResult, true)
 			: textResult.length > 0
 				? textResult
-				: "(see attached image)"
+				: hasImages
+					? "(see attached image)"
+					: ""
 	).toWellFormed();
 	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
 		// Strict backends (Azure, Copilot) reject unpaired outputs outright, but
@@ -1647,7 +1771,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
-	if (customCallIds?.has(normalized.callId)) {
+	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
 		messages.push({
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
@@ -1701,12 +1825,76 @@ export function appendReasoningSummaryPart(
 	item.summary.push(part);
 }
 
-/** Chooses the final reasoning text without discarding content already streamed into the block. */
-export function finalizeReasoningThinking(item: ResponseReasoningItem, streamedThinking: string): string {
+/**
+ * Response-global accumulator for the sequential-cutoff summary contract.
+ *
+ * Summary indices are cumulative across ALL reasoning items in a response:
+ * each new reasoning item replays the previous item's last completed section
+ * (`.done` at index N-1) before streaming its own, and replay-only items may
+ * add nothing new. Folding per item would re-emit every replayed section, so
+ * the canonical summary and the emitted text span items and live here.
+ */
+export interface SequentialCutoffSummaryState {
+	/** Latest full text per response-global summary index. */
+	summary: ResponseReasoningItem["summary"];
+	/** Canonical summary text already emitted as thinking deltas across all blocks. */
+	emitted: string;
+}
+
+export function createSequentialCutoffSummaryState(): SequentialCutoffSummaryState {
+	return { summary: [], emitted: "" };
+}
+
+// Sequential-cutoff streams may repeat the full canonical summary as later parts.
+function foldReasoningSummary(parts: ResponseReasoningItem["summary"] | undefined): string {
+	if (!parts) return "";
+	let canonical = "";
+	for (const part of parts) {
+		const text = part.text;
+		if (!text || text === canonical) continue;
+		const extendsCanonical = text.startsWith(canonical) && text[canonical.length] === "\n";
+		canonical = !canonical || extendsCanonical ? text : `${canonical}\n\n${text}`;
+	}
+	return canonical;
+}
+
+/** Chooses final reasoning text without making sequential-cutoff results disagree with emitted deltas. */
+export function finalizeReasoningThinking(
+	item: ResponseReasoningItem,
+	streamedThinking: string,
+	cutoff?: SequentialCutoffSummaryState,
+): string {
+	if (cutoff) return finalizeCutoffReasoningThinking(item, streamedThinking, cutoff);
 	const summaryThinking = item.summary?.map(part => part.text).join("\n\n") ?? "";
 	if (summaryThinking) return summaryThinking;
 	const contentThinking = item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
 	return contentThinking || streamedThinking || "";
+}
+
+function finalizeCutoffReasoningThinking(
+	item: ResponseReasoningItem,
+	streamedThinking: string,
+	cutoff: SequentialCutoffSummaryState,
+): string {
+	// The block's streamed deltas are authoritative: final text must never
+	// disagree with what delta consumers already rendered.
+	if (streamedThinking) return streamedThinking;
+	const summaryThinking = foldReasoningSummary(item.summary);
+	if (summaryThinking) {
+		// The done payload carries the response-cumulative summary. Emit only
+		// what no earlier block already emitted; replay-only items finalize empty.
+		if (cutoff.emitted.startsWith(summaryThinking)) return "";
+		if (!cutoff.emitted || summaryThinking.startsWith(cutoff.emitted)) {
+			const suffix = summaryThinking.slice(cutoff.emitted.length).replace(/^\n+/, "");
+			// Adopt the payload as canonical so later items cannot replay this text.
+			cutoff.summary = item.summary?.map(part => ({ ...part })) ?? [];
+			cutoff.emitted = summaryThinking;
+			return suffix;
+		}
+		// Diverged from streamed text — the deltas already shown win.
+		return "";
+	}
+	return item.content?.[0]?.type === "reasoning_text" ? (item.content[0].text ?? "") : "";
 }
 
 export function appendReasoningSummaryTextDelta(
@@ -1738,6 +1926,42 @@ export function appendReasoningSummaryPartDone(
 	block.thinking += "\n\n";
 	lastPart.text += "\n\n";
 	stream.push({ type: "thinking_delta", contentIndex, delta: "\n\n", partial: output });
+}
+
+/**
+ * Applies an atomic `response.reasoning_summary_text.done` snapshot.
+ *
+ * Sequential-cutoff summary indices are response-global: later reasoning items
+ * replay earlier sections, resend the accumulated summary as one part, or
+ * complete without new sections. The canonical summary is rebuilt in `state`
+ * (spanning items) and only its append-only suffix is emitted into the current
+ * block. Divergent corrections stay buffered until finalization so delta
+ * consumers never receive suffixes based on unseen replacement text.
+ */
+export function applyReasoningSummaryDone(
+	state: SequentialCutoffSummaryState,
+	block: ThinkingContent,
+	text: string,
+	summaryIndex: number,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+): void {
+	while (state.summary.length <= summaryIndex) {
+		state.summary.push({ type: "summary_text", text: "" });
+	}
+	state.summary[summaryIndex].text = text;
+	const after = foldReasoningSummary(state.summary);
+	if (!after.startsWith(state.emitted)) return;
+	let delta = after.slice(state.emitted.length);
+	if (!delta) return;
+	state.emitted = after;
+	// A fresh block starts a new section: drop the inter-section separator so
+	// each thinking block stands alone.
+	if (!block.thinking) delta = delta.replace(/^\n+/, "");
+	if (!delta) return;
+	block.thinking += delta;
+	stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
 }
 
 export function appendMessageContentPart(
@@ -1777,6 +2001,11 @@ export function appendMessageTextDelta(
 		lastPart.refusal += delta;
 	}
 	stream.push({ type: "text_delta", contentIndex, delta, partial: output });
+}
+/** Chooses final message text while treating non-empty terminal content as authoritative. */
+export function finalizeMessageText(item: ResponseOutputMessage, streamedText: string): string {
+	if (!item.content?.length) return streamedText || "";
+	return item.content.map(part => (part.type === "output_text" ? (part.text ?? "") : (part.refusal ?? ""))).join("");
 }
 
 export function accumulateToolCallArgumentsDelta(
@@ -2255,9 +2484,7 @@ export async function processResponsesStream<TApi extends Api>(
 				closeOpenItem(event.output_index, item.id, entry);
 			} else if (item.type === "message") {
 				const block = entry?.block.type === "text" ? entry.block : undefined;
-				const text = item.content
-					.map(part => (part.type === "output_text" ? (part.text ?? "") : (part.refusal ?? "")))
-					.join("");
+				const text = finalizeMessageText(item, block?.text ?? "");
 				const textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
 				let contentIndex: number;
 				if (block) {
@@ -2329,6 +2556,19 @@ export async function processResponsesStream<TApi extends Api>(
 				}
 				closeOpenItem(event.output_index, item.id, entry, item.call_id, prefixedFunctionCallItemKey(item.call_id));
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+			} else if (item.type === "image_generation_call" && item.status === "completed" && item.result) {
+				const image: ImageContent = {
+					type: "image",
+					data: item.result,
+					mimeType: parseImageMetadata(Buffer.from(item.result, "base64"))?.mimeType ?? "image/png",
+				};
+				output.content.push(image);
+				stream.push({
+					type: "image_end",
+					contentIndex: output.content.length - 1,
+					content: image,
+					partial: output,
+				});
 			}
 		} else if (terminalEvent) {
 			const response = terminalEvent.response;
@@ -2338,6 +2578,7 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
 			calculateCost(model, output.usage);
+			applyOpenRouterReportedCost(model, output.usage, response?.usage);
 			applyOpenAIResponsesServiceTierCost(
 				model,
 				output.usage,
@@ -2514,7 +2755,9 @@ type CommonSamplingOptions = Pick<
 export function applyCommonResponsesSamplingParams<P extends CommonResponsesParams>(
 	params: P,
 	options: CommonSamplingOptions | undefined,
-	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens">,
+	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens"> & {
+		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams">;
+	},
 ): void {
 	if (options?.maxTokens && !model.omitMaxOutputTokens) {
 		params.max_output_tokens = Math.min(
@@ -2523,12 +2766,16 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 			OPENAI_MAX_OUTPUT_TOKENS,
 		);
 	}
-	if (options?.temperature !== undefined) params.temperature = options.temperature;
-	if (options?.topP !== undefined) params.top_p = options.topP;
-	if (options?.topK !== undefined) params.top_k = options.topK;
-	if (options?.minP !== undefined) params.min_p = options.minP;
-	if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
-	if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+	// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
+	// sampling params with a 400 on every serving host (#5606).
+	if (model.compat.supportsSamplingParams) {
+		if (options?.temperature !== undefined) params.temperature = options.temperature;
+		if (options?.topP !== undefined) params.top_p = options.topP;
+		if (options?.topK !== undefined) params.top_k = options.topK;
+		if (options?.minP !== undefined) params.min_p = options.minP;
+		if (options?.presencePenalty !== undefined) params.presence_penalty = options.presencePenalty;
+		if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
+	}
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 }
 
