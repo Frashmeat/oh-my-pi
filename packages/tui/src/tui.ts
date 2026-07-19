@@ -2803,8 +2803,7 @@ export class TUI extends Container {
 			this.#altEnterWidth = width;
 			this.#altEnterHeight = height;
 		} else if (!wantAlt && this.#altActive) {
-			const mouseExit =
-				this.#altMouseTrackingActive || this.#baseMouseTrackingEnabled ? MOUSE_TRACKING_OFF : "";
+			const mouseExit = this.#altMouseTrackingActive || this.#baseMouseTrackingEnabled ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
 			const mouseRestore = this.#baseMouseTrackingEnabled ? MOUSE_TRACKING_ON : "";
 			const exitSequence = `${mouseExit}${enhancementExit}${ALT_SCREEN_EXIT}${mouseRestore}`;

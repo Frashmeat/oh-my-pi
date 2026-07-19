@@ -26,6 +26,25 @@ class MutableBlock implements Component {
 	}
 }
 
+class WrappingBlock implements Component {
+	constructor(readonly text: string) {}
+	invalidate(): void {}
+	render(width: number): string[] {
+		const chunkWidth = Math.max(1, width);
+		const lines: string[] = [];
+		for (let start = 0; start < this.text.length; start += chunkWidth) {
+			lines.push(this.text.slice(start, start + chunkWidth));
+		}
+		return lines;
+	}
+}
+
+function transcriptTextWithoutScrollbar(line: string): string {
+	const plain = stripVTControlCharacters(line);
+	const last = plain.at(-1);
+	return last === "│" || last === "█" ? plain.slice(0, -1).trimEnd() : plain;
+}
+
 // A block that can declare itself still-mutating (a foreground tool awaiting its
 // result). The container must keep such a block in the repaintable live region —
 // even with finalized blocks below it — until it finalizes.
@@ -792,6 +811,52 @@ describe("TranscriptContainer fixed viewport", () => {
 });
 
 describe("FixedTranscriptLayout", () => {
+	it("pins the fixed viewport outside native scrollback", () => {
+		const transcript = new TranscriptContainer();
+		const layout = new FixedTranscriptLayout(transcript, [new MutableBlock(["> prompt"])], () => 4);
+
+		expect(layout.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(layout.isNativeScrollbackLiveRegionPinned()).toBeTrue();
+	});
+
+	it("hides the internal scrollbar when the transcript fits the viewport", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new MutableBlock(["only"]));
+		const layout = new FixedTranscriptLayout(transcript, [new MutableBlock(["> prompt"])], () => 4);
+
+		const lines = layout.render(8).map(line => stripVTControlCharacters(line));
+
+		expect(lines.slice(0, 3)).toEqual(["only", "", ""]);
+		expect(lines.join("")).not.toContain("│");
+		expect(lines.join("")).not.toContain("█");
+	});
+
+	it("renders an internal scrollbar and reserves its column for transcript wrapping", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new WrappingBlock("abcde"));
+		const layout = new FixedTranscriptLayout(transcript, [new MutableBlock(["> prompt"])], () => 2);
+
+		const lines = layout.render(5).map(line => stripVTControlCharacters(line));
+
+		expect(lines).toEqual(["e   █", "> prompt"]);
+	});
+
+	it("moves the internal scrollbar thumb with the transcript viewport", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new MutableBlock(["a"]));
+		transcript.addChild(new MutableBlock(["b"]));
+		transcript.addChild(new MutableBlock(["c"]));
+		const layout = new FixedTranscriptLayout(transcript, [new MutableBlock(["> prompt"])], () => 4);
+
+		const bottom = layout.render(8).map(line => stripVTControlCharacters(line));
+		expect(bottom.slice(0, 3).map(line => line.at(-1))).toEqual(["│", "│", "█"]);
+
+		transcript.scrollViewportRows(-2);
+		const top = layout.render(8).map(line => stripVTControlCharacters(line));
+		expect(top.slice(0, 3).map(line => line.at(-1))).toEqual(["█", "│", "│"]);
+		expect(top.at(-1)).toBe("> prompt");
+	});
+
 	it("keeps the bottom composer rows fixed at the terminal bottom", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new MutableBlock(["a"]));
@@ -803,7 +868,7 @@ describe("FixedTranscriptLayout", () => {
 
 		expect(lines).toHaveLength(5);
 		expect(lines.at(-1)).toBe("> prompt");
-		expect(lines.slice(0, -1)).toEqual(["", "b", "", "c"]);
+		expect(lines.slice(0, -1).map(transcriptTextWithoutScrollbar)).toEqual(["", "b", "", "c"]);
 	});
 
 	it("scrolls transcript content without moving the composer row", () => {
@@ -819,7 +884,8 @@ describe("FixedTranscriptLayout", () => {
 		const lines = layout.render(40);
 
 		expect(lines).toHaveLength(4);
-		expect(lines).toEqual(["first", "", "second", "> prompt"]);
+		expect(lines.slice(0, -1).map(transcriptTextWithoutScrollbar)).toEqual(["first", "", "second"]);
+		expect(lines.at(-1)).toBe("> prompt");
 	});
 });
 

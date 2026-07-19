@@ -1,4 +1,5 @@
-import type { Component, NativeScrollbackLiveRegion } from "@oh-my-pi/pi-tui";
+import { type Component, Ellipsis, type NativeScrollbackLiveRegion, ScrollView } from "@oh-my-pi/pi-tui";
+import { theme } from "../theme/theme";
 import type { TranscriptContainer } from "./transcript-container";
 
 type TerminalRowsProvider = () => number | undefined;
@@ -11,6 +12,12 @@ export class FixedTranscriptLayout implements Component, NativeScrollbackLiveReg
 	readonly children: Component[];
 	#lastTranscriptRows = 1;
 	#activeTranscriptRows = 1;
+	#transcriptScrollView = new ScrollView([], {
+		height: 1,
+		scrollbar: "auto",
+		ellipsis: Ellipsis.Omit,
+		theme: { track: text => theme.fg("dim", text), thumb: text => theme.fg("accent", text) },
+	});
 
 	constructor(
 		readonly transcript: TranscriptContainer,
@@ -54,13 +61,27 @@ export class FixedTranscriptLayout implements Component, NativeScrollbackLiveReg
 		this.#activeTranscriptRows = Math.max(1, transcriptRows);
 		this.#lastTranscriptRows = this.#activeTranscriptRows;
 
-		const transcriptLines = transcriptRows > 0 ? this.transcript.render(width).slice(0, transcriptRows) : [];
-		const fillerRows = Math.max(0, height - transcriptLines.length - visibleBottomLines.length);
+		const transcriptWidth = width > 1 ? width - 1 : width;
+		const transcriptLines =
+			transcriptRows > 0 ? this.transcript.render(transcriptWidth).slice(0, transcriptRows) : [];
+		const visibleTranscriptLines = this.#renderTranscriptViewport(width, transcriptRows, transcriptLines);
+		const fillerRows = Math.max(0, height - visibleTranscriptLines.length - visibleBottomLines.length);
 		const lines: string[] = [];
-		for (const line of transcriptLines) lines.push(line);
+		for (const line of visibleTranscriptLines) lines.push(line);
 		for (let i = 0; i < fillerRows; i++) lines.push("");
 		for (const line of visibleBottomLines) lines.push(line);
 		return lines.length > height ? lines.slice(lines.length - height) : lines;
+	}
+
+	#renderTranscriptViewport(width: number, rows: number, lines: readonly string[]): readonly string[] {
+		if (rows <= 0) return [];
+		const metrics = this.transcript.getViewportMetrics();
+		this.#transcriptScrollView.setHeight(rows);
+		this.#transcriptScrollView.setLines(lines);
+		this.#transcriptScrollView.setTotalRows(metrics.totalRows);
+		this.#transcriptScrollView.setScrollOffset(metrics.topRow);
+		this.#transcriptScrollView.setScrollbar(width > 1 ? "auto" : "never");
+		return this.#transcriptScrollView.render(width);
 	}
 
 	#terminalRows(): number {

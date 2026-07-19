@@ -7,6 +7,7 @@
 ### Added
 
 - Added an extension transcript-scroll API and a fixed interactive layout that keeps the composer visible while the transcript scrolls independently.
+- Added a right-edge scrollbar to the interactive transcript viewport so overflow and the current scroll position remain visible while the composer stays fixed.
 
 ### Fixed
 

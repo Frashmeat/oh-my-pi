@@ -137,6 +137,11 @@ export interface TranscriptScrollOptions {
 	align?: "start" | "center" | "end" | "nearest";
 }
 
+export interface TranscriptViewportMetrics {
+	topRow: number;
+	totalRows: number;
+}
+
 /**
  * Transcript container that renders every block's current content each frame
  * and reports the native-scrollback exactness boundary
@@ -221,6 +226,13 @@ export class TranscriptContainer
 		this.invalidate();
 	}
 
+	getViewportMetrics(): TranscriptViewportMetrics {
+		return {
+			topRow: this.#viewportTopRow,
+			totalRows: this.#lines.length,
+		};
+	}
+
 	scrollComponentIntoView(component: Component, options: TranscriptScrollOptions = {}): void {
 		this.#pendingScroll = {
 			component,
@@ -238,11 +250,7 @@ export class TranscriptContainer
 	}
 
 	override setNativeScrollbackCommittedRows(rows: number): void {
-		this.#committedRows = this.#viewportRowsProvider
-			? 0
-			: Number.isFinite(rows)
-				? Math.max(0, Math.trunc(rows))
-				: 0;
+		this.#committedRows = this.#viewportRowsProvider ? 0 : Number.isFinite(rows) ? Math.max(0, Math.trunc(rows)) : 0;
 		for (let i = 0; i < this.children.length; i++) {
 			const child = this.children[i]!;
 			const segment = this.#segments[i];
