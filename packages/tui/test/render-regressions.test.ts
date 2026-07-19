@@ -9,6 +9,7 @@ import {
 	TERMINAL,
 	TUI,
 } from "@oh-my-pi/pi-tui";
+import { isConPTYHosted } from "@oh-my-pi/pi-tui/terminal";
 import { VirtualTerminal } from "./virtual-terminal";
 
 class MutableLinesComponent implements Component {
@@ -154,6 +155,16 @@ async function settle(term: VirtualTerminal): Promise<void> {
 	await immediate.promise;
 	await Bun.sleep(1);
 	await term.flush();
+}
+
+// A destructive full paint arms a 150 ms quiet window on ConPTY hosts. A frame
+// requested inside that window is coalesced into a trailing render, so tests
+// awaiting that frame must wait past the contract before inspecting the terminal.
+async function settleConPTYDeferredRender(term: VirtualTerminal): Promise<void> {
+	await settle(term);
+	if (!isConPTYHosted()) return;
+	await Bun.sleep(200);
+	await settle(term);
 }
 
 // Outside a multiplexer a resize paints the viewport immediately and defers the
@@ -1080,7 +1091,7 @@ describe("TUI terminal-state regressions", () => {
 
 				component.setLines(rows("row-", 24));
 				tui.requestRender();
-				await settle(term);
+				await settleConPTYDeferredRender(term);
 
 				const viewport = visible(term).filter(line => line.trim().length > 0);
 				expect(viewport).toHaveLength(6);
@@ -2124,7 +2135,7 @@ describe("TUI terminal-state regressions", () => {
 				// tail commits normally on the update path — exactly once.
 				component.setLines([...finalFrame, ...rows("tail-", 5)]);
 				tui.requestRender();
-				await settle(term);
+				await settleConPTYDeferredRender(term);
 
 				expect(visible(term).map(line => line.trim())).toEqual(rows("tail-", 5));
 				const grownHistory = term
@@ -2517,7 +2528,7 @@ describe("TUI terminal-state regressions", () => {
 				const short = [...rows("short-", 14), "prompt-row"];
 				component.setLines(short);
 				tui.requestRender();
-				await settle(term);
+				await settleConPTYDeferredRender(term);
 
 				expect(visible(term).map(line => line.trim())).toEqual([
 					"short-5",
@@ -3214,7 +3225,7 @@ describe("TUI terminal-state regressions", () => {
 				term.scrollLines(-1);
 				await settle(term);
 				handle.hide();
-				await settle(term);
+				await settleConPTYDeferredRender(term);
 
 				expect(term.getScrollBuffer().some(line => line.includes("OV_SENTINEL_4_"))).toBeFalse();
 				expect(visible(term).some(line => line.includes("OV_SENTINEL_4_"))).toBeFalse();
