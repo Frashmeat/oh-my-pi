@@ -1,4 +1,4 @@
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { Component, NativeScrollbackLiveRegion } from "@oh-my-pi/pi-tui";
 import type { TranscriptContainer } from "./transcript-container";
 
 type TerminalRowsProvider = () => number | undefined;
@@ -7,7 +7,7 @@ type TerminalRowsProvider = () => number | undefined;
  * Root layout for interactive mode: transcript scrolls inside its own viewport,
  * while the composer/status area is always rendered at the terminal bottom.
  */
-export class FixedTranscriptLayout implements Component {
+export class FixedTranscriptLayout implements Component, NativeScrollbackLiveRegion {
 	readonly children: Component[];
 	#lastTranscriptRows = 1;
 	#activeTranscriptRows = 1;
@@ -23,6 +23,14 @@ export class FixedTranscriptLayout implements Component {
 
 	getTranscriptRows(): number {
 		return this.#lastTranscriptRows;
+	}
+
+	getNativeScrollbackLiveRegionStart(): number {
+		return 0;
+	}
+
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		return true;
 	}
 
 	invalidate(): void {
