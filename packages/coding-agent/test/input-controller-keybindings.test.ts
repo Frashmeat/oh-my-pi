@@ -2,6 +2,7 @@ import { describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 
 type FakeEditor = {
@@ -56,11 +57,12 @@ function registeredInputListeners(addInputListener: Mock<(listener: InputListene
 
 async function createContext() {
 	let editorText = "";
-	const keyMap: Record<string, string[]> = {
+	const keyMap: Record<string, KeyId[]> = {
 		"app.display.reset": ["ctrl+l"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
+		"app.clipboard.pasteImage": ["ctrl+v"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -154,6 +156,9 @@ async function createContext() {
 		keybindings: {
 			getKeys(action: string) {
 				return keyMap[action] ? [...keyMap[action]] : [];
+			},
+			matches(data: string, action: string) {
+				return keyMap[action]?.some(key => matchesKey(data, key)) ?? false;
 			},
 		} as InteractiveModeContext["keybindings"],
 		locallySubmittedUserSignatures: new Set<string>(),
@@ -424,6 +429,49 @@ describe("InputController keybinding setup", () => {
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
 	});
 
+	it("routes the smart-paste shortcut to a focused login input", async () => {
+		const { promise: pasted, resolve: resolvePaste } = Promise.withResolvers<string>();
+		const focusedPasteText = vi.fn((text: string) => {
+			resolvePaste(text);
+		});
+		const { InputController, ctx, setFocused, spies } = await createContext();
+		setFocused({ pasteText: focusedPasteText });
+		const controller = new InputController(ctx, {
+			readImage: async () => null,
+			readText: async () => "sk-test-key",
+		});
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\x16");
+
+		expect(result).toEqual({ consume: true });
+		expect(await pasted).toBe("sk-test-key");
+		expect(focusedPasteText).toHaveBeenCalledWith("sk-test-key");
+	});
+
+	it("rejects image smart-paste while a login input is focused instead of mutating the hidden editor", async () => {
+		const focusedPasteText = vi.fn();
+		const { InputController, ctx, editor, setFocused, spies } = await createContext();
+		setFocused({ pasteText: focusedPasteText });
+		const { promise: rejected, resolve: resolveRejected } = Promise.withResolvers<string>();
+		(ctx.showStatus as unknown as Mock<(message: string) => void>).mockImplementation(message => {
+			resolveRejected(message);
+		});
+		const controller = new InputController(ctx, {
+			readImage: async () => ({ data: new Uint8Array([0x89, 0x50]), mimeType: "image/png" }),
+			readText: async () => "sk-test-key",
+		});
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\x16");
+
+		expect(result).toEqual({ consume: true });
+		expect(await rejected).toBe("Image paste is not supported in this prompt");
+		expect(focusedPasteText).not.toHaveBeenCalled();
+		expect(editor.pendingImages).toHaveLength(0);
+		expect(editor.getText()).toBe("");
+	});
+
 	it("routes c to copy a copyable /btw panel when the editor is empty", async () => {
 		const { InputController, ctx, spies } = await createContext();
 		(ctx.canCopyBtw as unknown as { mockReturnValue(value: boolean): void }).mockReturnValue(true);
@@ -493,6 +541,29 @@ describe("InputController keybinding setup", () => {
 
 		expect(result).toEqual({ consume: true });
 		expect(spies.scrollTranscriptRows).toHaveBeenCalledWith(3);
+	});
+
+	it("consumes non-wheel SGR mouse reports without routing them into the editor", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[<0;10;4M");
+
+		expect(result).toEqual({ consume: true });
+		expect(spies.scrollTranscriptRows).not.toHaveBeenCalled();
+	});
+
+	it("does not intercept main-screen mouse reports while another component is focused", async () => {
+		const { InputController, ctx, setFocused, spies } = await createContext();
+		setFocused({});
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\x1b[<65;10;4M");
+
+		expect(result).toBeUndefined();
+		expect(spies.scrollTranscriptRows).not.toHaveBeenCalled();
 	});
 
 	it("lets page keys fall through while editing a multiline draft", async () => {

@@ -80,12 +80,12 @@ const CURSOR_BEGIN = `${HIDE_CURSOR}${SYNC_OUTPUT_BEGIN}`;
 const CURSOR_BEGIN_NO_SYNC = HIDE_CURSOR;
 const CURSOR_END = SYNC_OUTPUT_END;
 const CURSOR_END_NO_SYNC = "";
-// Mouse reporting is scoped to fullscreen overlays that opt into pointer
-// interaction. 1000h = button click tracking, 1003h = any-motion tracking for
-// hover targets, and 1006h = SGR extended coordinates past column/row 223.
-// Selection-first overlays leave these modes disabled so the terminal retains
-// native text selection.
-const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
+// Fullscreen overlays need click, wheel, and any-motion reports for hover.
+// The normal screen only needs click/wheel reports for transcript scrolling;
+// omitting 1003 avoids forwarding every pointer move through the editor input
+// path. 1006 selects SGR extended coordinates past column/row 223.
+const FULLSCREEN_MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
+const MAIN_SCREEN_MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
 const ALT_SCREEN_ENTER = "\x1b[?1049h";
 const ALT_SCREEN_EXIT = "\x1b[?1049l";
@@ -1605,6 +1605,9 @@ export class TUI extends Container {
 			() => this.stop(),
 		);
 		if (this.#stopped) return;
+		if (this.#baseMouseTrackingEnabled && !this.#altActive) {
+			this.terminal.write(MAIN_SCREEN_MOUSE_TRACKING_ON);
+		}
 		for (const listener of this.#startListeners) {
 			try {
 				listener();
@@ -1637,7 +1640,7 @@ export class TUI extends Container {
 		if (this.#baseMouseTrackingEnabled === enabled) return;
 		this.#baseMouseTrackingEnabled = enabled;
 		if (this.#stopped || this.#altActive) return;
-		this.terminal.write(enabled ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
+		this.terminal.write(enabled ? MAIN_SCREEN_MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
 	}
 
 	removeInputListener(listener: InputListener): void {
@@ -2794,7 +2797,7 @@ export class TUI extends Container {
 			// screen, or Esc/modified keys revert to legacy encoding inside
 			// fullscreen overlays (Ghostty/kitty/iTerm2).
 			const mouseEnter = wantMouseTracking
-				? MOUSE_TRACKING_ON
+				? FULLSCREEN_MOUSE_TRACKING_ON
 				: this.#baseMouseTrackingEnabled
 					? MOUSE_TRACKING_OFF
 					: "";
@@ -2811,7 +2814,7 @@ export class TUI extends Container {
 		} else if (!wantAlt && this.#altActive) {
 			const mouseExit = this.#altMouseTrackingActive || this.#baseMouseTrackingEnabled ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
-			const mouseRestore = this.#baseMouseTrackingEnabled ? MOUSE_TRACKING_ON : "";
+			const mouseRestore = this.#baseMouseTrackingEnabled ? MAIN_SCREEN_MOUSE_TRACKING_ON : "";
 			const exitSequence = `${mouseExit}${enhancementExit}${ALT_SCREEN_EXIT}${mouseRestore}`;
 			// Session replacement can finish while a fullscreen selector is still
 			// covering the old normal buffer. Keep the overlay visible until the
@@ -2833,7 +2836,7 @@ export class TUI extends Container {
 				this.#resizeEventPending = true;
 			}
 		} else if (wantMouseTracking !== this.#altMouseTrackingActive) {
-			this.terminal.write(wantMouseTracking ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
+			this.terminal.write(wantMouseTracking ? FULLSCREEN_MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
 			this.#altMouseTrackingActive = wantMouseTracking;
 		}
 		if (this.#altActive) {

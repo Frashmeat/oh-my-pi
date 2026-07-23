@@ -3358,7 +3358,7 @@ describe("TUI terminal-state regressions", () => {
 				const hideWrites = writes.slice(hideFrom).join("");
 				expect(hideWrites).toContain("\x1b[?1049l");
 				expect(hideWrites).toContain("\x1b[?1006l\x1b[?1003l\x1b[?1000l");
-				expect(hideWrites).toContain("\x1b[?1049l\x1b[?1000h\x1b[?1003h\x1b[?1006h");
+				expect(hideWrites).toContain("\x1b[?1049l\x1b[?1000h\x1b[?1006h");
 			} finally {
 				tui.stop();
 			}

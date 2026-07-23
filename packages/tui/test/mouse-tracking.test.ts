@@ -37,6 +37,19 @@ describe("TUI mouse tracking", () => {
 		tui.setMouseTrackingEnabled(true);
 		tui.setMouseTrackingEnabled(false);
 
-		expect(terminal.writes).toEqual(["\x1b[?1000h\x1b[?1003h\x1b[?1006h", "\x1b[?1006l\x1b[?1003l\x1b[?1000l"]);
+		expect(terminal.writes).toEqual(["\x1b[?1000h\x1b[?1006h", "\x1b[?1006l\x1b[?1003l\x1b[?1000l"]);
+	});
+
+	it("restores requested main-screen mouse tracking after stop and restart", () => {
+		const terminal = new RecordingTerminal();
+		const tui = new TUI(terminal);
+
+		tui.start();
+		tui.setMouseTrackingEnabled(true);
+		tui.stop();
+		tui.start();
+		tui.stop();
+
+		expect(terminal.writes.filter(write => write === "\x1b[?1000h\x1b[?1006h")).toHaveLength(2);
 	});
 });
